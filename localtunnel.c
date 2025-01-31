@@ -4,10 +4,11 @@
 
 
 #include <assert.h>
+#include <getopt.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -26,13 +27,42 @@
 ////////////////////////////////////////////////////////////////////////////////
 // log
 
+static bool _enable_log = false;
+
 #define log(format, ...) do { \
-    time_t t = time(NULL); \
-    struct tm *tm_info = localtime(&t); \
-    char time_buf[20]; \
-    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info); \
-    fprintf(stderr, "%s] " format "\n", time_buf, ##__VA_ARGS__); \
+    if (_enable_log) { \
+        time_t t = time(NULL); \
+        struct tm *tm_info = localtime(&t); \
+        char time_buf[20]; \
+        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info); \
+        fprintf(stderr, "%s] " format "\n", time_buf, ##__VA_ARGS__); \
+    } \
 } while (0)
+
+////////////////////////////////////////////////////////////////////////////////
+// alloc
+
+void *lt_alloc_and_clean(int len) {
+    void *mem = malloc(len);
+    if (!mem) {
+        log("crit error, malloc failed");
+        exit(1);
+    }
+    memset(mem, 0, len);
+    return mem;
+}
+
+#define lt_alloc(type) (type*)lt_alloc_and_clean(sizeof(type))
+#define lt_alloc_array(type, n) (type*)lt_alloc_and_clean(sizeof(type) * (n))
+
+char *lt_strdup(const char* str) {
+    char *s2 = strdup(str);
+    if (!s2) {
+        log("crit error, strdup failed");
+        exit(1);
+    }
+    return s2;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // lt_buf_t
@@ -196,12 +226,7 @@ lt_create_conn(struct ev_loop *loop, const char *host, int port) {
         }
     }
 
-    conn = malloc(sizeof(*conn));
-    if (!conn) {
-        log("malloc error");
-        goto error;
-    }
-    memset(conn, 0, sizeof(*conn));
+    conn = lt_alloc(lt_conn_t);
 
     conn->loop = loop;
     conn->fd = fd;
@@ -377,10 +402,7 @@ bool lt_conn_write(lt_conn_t *conn, char *data, int len, bool freedata) {
         return true;
     }
 
-    writing_task_t *task = malloc(sizeof(*task));
-    if (!task) {
-        goto error;
-    }
+    writing_task_t *task = lt_alloc(writing_task_t);
     task->data = data;
     task->len = len;
     task->written = nwrite;
@@ -402,21 +424,15 @@ error:
     return false;
 }
 
-lt_conn_handler_t * 
+void
 lt_conn_add_handler(lt_conn_t *conn, lt_conn_callback cb, void *data) {
-    lt_conn_handler_t *h = malloc(sizeof(*h));
-    if (!h) {
-        log("malloc failed");
-        return NULL;
-    }
+    lt_conn_handler_t *h = lt_alloc(lt_conn_handler_t);
     h->cb = cb;
     h->data = data;
     h->next = NULL;
 
     h->next = conn->handler;
     conn->handler = h;
-
-    return h;
 }
 
 void lt_conn_pipe_left_cb(lt_conn_t *left, void *data, int event) {
@@ -432,13 +448,7 @@ void lt_conn_pipe_left_cb(lt_conn_t *left, void *data, int event) {
         }
 
         if (available_bytes > 0) {
-            char *buf = malloc(available_bytes);
-            if (!buf) {
-                log("malloc failed");
-                lt_conn_close(left);
-                lt_conn_close(right);
-                return;
-            }
+            char *buf = lt_alloc_array(char, available_bytes);
             int nread = read(left->fd, buf, available_bytes);
             if (!lt_conn_write(right, buf, nread, true)) {
                 log("lt_conn_write failed");
@@ -464,16 +474,9 @@ void lt_conn_pipe_right_cb(lt_conn_t *right, void *data, int event) {
     }
 }
 
-bool lt_conn_pipe_to(lt_conn_t *left, lt_conn_t *right) {
-    if (!lt_conn_add_handler(left, lt_conn_pipe_left_cb, right)) {
-        log("lt_conn_add_handler failed");
-        return false;
-    }
-    if (!lt_conn_add_handler(right, lt_conn_pipe_right_cb, left)) {
-        log("lt_conn_add_handler failed");
-        return false;
-    }
-    return true;
+void lt_conn_pipe_to(lt_conn_t *left, lt_conn_t *right) {
+    lt_conn_add_handler(left, lt_conn_pipe_left_cb, right);
+    lt_conn_add_handler(right, lt_conn_pipe_right_cb, left);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -482,18 +485,24 @@ bool lt_conn_pipe_to(lt_conn_t *left, lt_conn_t *right) {
 #define MAX_CONSECUTIVE_ERRORS 3
 #define MIN_CONNS              4
 #define MIN_IDLE_CONNS         1
+#define DEFAULT_MAX_CONN       4
 
 typedef struct {
     struct ev_loop *loop;
 
-    char *remote_host;
-    int remote_port;
+    // config
+    char *host;
 
     char *local_host;
     int local_port;
 
+    // options from server
+    char *remote_host;
+    int remote_port;
+
     char *id;
     char *url;
+    char *cached_url;
     int max_conn_count;
 
     // running status
@@ -512,10 +521,12 @@ typedef struct {
 localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt);
 
 void cleanup_localtunnel(localtunnel_t *lt) {
-    free(lt->remote_host);
+    free(lt->host);
     free(lt->local_host);
+    free(lt->remote_host);
     free(lt->id);
     free(lt->url);
+    free(lt->cached_url);
 }
 
 bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
@@ -528,12 +539,20 @@ bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
     }
 
     cJSON *id = cJSON_GetObjectItem(json, "id");
+    cJSON *ip = cJSON_GetObjectItem(json, "ip");
     cJSON *port = cJSON_GetObjectItem(json, "port");
     cJSON *max_conn_count = cJSON_GetObjectItem(json, "max_conn_count");
     cJSON *url = cJSON_GetObjectItem(json, "url");
+    cJSON *cached_url = cJSON_GetObjectItem(json, "cached_url");
 
-    if (id && id->type == cJSON_String) {
-        lt->id = strdup(id->valuestring);
+    if (!lt->id && id && id->type == cJSON_String) {
+        lt->id = lt_strdup(id->valuestring);
+    }
+
+    if (ip && ip->type == cJSON_String) {
+        lt->remote_host = lt_strdup(ip->valuestring);
+    } else {
+        lt->remote_host = lt_strdup(lt->host);
     }
 
     if (port && port->type == cJSON_Number) {
@@ -546,14 +565,18 @@ bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
     if (max_conn_count && max_conn_count->type == cJSON_Number) {
         lt->max_conn_count = max_conn_count->valueint;
     } else {
-        lt->max_conn_count = 4;
+        lt->max_conn_count = DEFAULT_MAX_CONN;
     }
 
     if (url && url->type == cJSON_String) {
-        lt->url = strdup(url->valuestring);
+        lt->url = lt_strdup(url->valuestring);
     } else {
         log("no url in response");
         goto cleanup;
+    }
+
+    if (cached_url && cached_url->type == cJSON_String) {
+        lt->cached_url = lt_strdup(cached_url->valuestring);
     }
 
     br = true;
@@ -569,15 +592,11 @@ bool request_localtunnel(localtunnel_t *lt) {
     char url[1024];
     lt_buf_t resp = {0};
 
-    if (!lt->remote_host) {
-        lt->remote_host = strdup("localtunnel.me");
-        if (!lt->remote_host) {
-            log("strdup failed");
-            goto cleanup;
-        }
+    if (lt->id) {
+        snprintf(url, sizeof(url), "https://%s/%s", lt->host, lt->id);
+    } else {
+        snprintf(url, sizeof(url), "https://%s/?new", lt->host);
     }
-
-    snprintf(url, sizeof(url), "https://%s/?new", lt->remote_host);
 
     curl = curl_easy_init();
     if (!curl) {
@@ -599,7 +618,10 @@ bool request_localtunnel(localtunnel_t *lt) {
 
     br = parse_localtunnel_response(resp.buf, resp.size, lt);
     if (br) {
-        printf("url: %s\n", lt->url);
+        printf("Your URL is: %s\n", lt->url);
+        if (lt->cached_url) {
+            printf("Your cached URL is: %s\n", lt->cached_url);
+        }
     } else {
         log("failed to parse response");
     }
@@ -672,20 +694,10 @@ void localtunnel_cb(lt_conn_t *conn, void *data, int event) {
                 return;
             }
             ltc->local->auto_destroy = true;
-            if (!lt_conn_add_handler(ltc->local, localtunnel_local_cb, ltc)) {
-                log("lt_conn_add_handler failed");
-                lt_conn_close(ltc->local);
-                lt_conn_close(ltc->remote);
-                return;
-            }
-            if (!lt_conn_pipe_to(ltc->remote, ltc->local)
-                || !lt_conn_pipe_to(ltc->local, ltc->remote))
-            {
-                log("failed to bridge connections");
-                lt_conn_close(ltc->local);
-                lt_conn_close(ltc->remote);
-                return;
-            }
+            lt_conn_add_handler(ltc->local, localtunnel_local_cb, ltc);
+            lt_conn_pipe_to(ltc->remote, ltc->local);
+            lt_conn_pipe_to(ltc->local, ltc->remote);
+
             log("*%d bridged: %d<=>%d",
                 ltc->remote->fd, ltc->remote->fd, ltc->local->fd);
             
@@ -711,12 +723,7 @@ void localtunnel_cb(lt_conn_t *conn, void *data, int event) {
 }
 
 localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt) {
-    localtunnel_conn_t *ltc = malloc(sizeof(*ltc));
-    if (!ltc) {
-        log("malloc failed");
-        return NULL;
-    }
-    memset(ltc, 0, sizeof(*ltc));
+    localtunnel_conn_t *ltc = lt_alloc(localtunnel_conn_t);
 
     ltc->lt = lt;
     ltc->remote = lt_create_conn(lt->loop, lt->remote_host, lt->remote_port);
@@ -726,12 +733,7 @@ localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt) {
         return NULL;
     }
     ltc->remote->auto_destroy = true;
-    if (!lt_conn_add_handler(ltc->remote, localtunnel_cb, ltc)) {
-        log("lt_conn_add_handler failed");
-        lt_conn_close(ltc->remote);
-        free(ltc);
-        return NULL;
-    }
+    lt_conn_add_handler(ltc->remote, localtunnel_cb, ltc);
 
     lt->conn_connecting += 1;
     log("*%d initialized to %s %d",
@@ -743,58 +745,86 @@ localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt) {
 ////////////////////////////////////////////////////////////////////////////////
 // main
 
-void dump_conn_cb(lt_conn_t *conn, void *data, int event) {
-    if (event == LT_CONN_READ_AVIL) {
-        char buf[8192];
-        int nread = read(conn->fd, buf, sizeof(buf));
-        if (nread < 0) {
-            if (errno != EAGAIN) {
-                log("read error: %d", errno);
-            }
-            return;
-        } else if (nread > 0) {
-            printf("%.*s", nread, buf);
-        }
+int localtunnel_main(localtunnel_t *lt) {
+    if (!request_localtunnel(lt)) {
+        log("failed to request localtunnel");
+        return 1;
     }
+
+    if (!localtunnel_create_conn(lt)) {
+        log("failed to initialize connection");
+        return 1;
+    }
+
+    return ev_run(lt->loop, 0);
+}
+
+void usage(const char *argv0) {
+    fprintf(stderr, "Usage: %s -p port [other options]\n", argv0);
+    fprintf(stderr, "  -l, --local <host>           local host, default: localhost\n");
+    fprintf(stderr, "  -p, --port <port>            local port, default: 8000\n");
+    fprintf(stderr, "  -h, --host <host>            remote server, default: localtunnel.me\n");
+    fprintf(stderr, "  -s, --subdomain <subdomain>  subdomain, default: random\n");
+    fprintf(stderr, "  -v, --verbose                verbose mode\n");
+    fprintf(stderr, "      --help                   print this\n");
 }
 
 int main(int argc, char *argv[]) {
-    struct ev_loop *loop = EV_DEFAULT;
+    localtunnel_t lt = {0};
+    lt.loop = EV_DEFAULT;
 
-    curl_global_init(CURL_GLOBAL_ALL);
+    struct option long_options[] = {
+        {"local", required_argument, 0, 'l'},
+        {"port", required_argument, 0, 'p'},
+        {"host", required_argument, 0, 'h'},
+        {"subdomain", required_argument, 0, 's'},
+        {"verbose", no_argument, 0, 'v'},
+        {"help", no_argument, 0, 0},
+        {0, 0, 0, 0}
+    };
 
-    // lt_conn_t * conn = lt_create_conn(loop, "baidu.com", 80);
-    // conn->auto_destroy = true;
-    // lt_conn_add_handler(conn, dump_conn_cb, NULL);
-
-    // char req[] = "GET / HTTP/1.1\r\n"
-    //              "Host: baidu.com\r\n"
-    //              "User-Agent: curl/8.5.0\r\n"
-    //              "Accept: */*\r\n"
-    //              "Connection: close\r\n"
-    //              "\r\n";
-    // lt_conn_write(conn, req, sizeof(req), false);
-    // ev_run(loop, 0);
-
-    {
-        localtunnel_t lt = {0};
-        lt.loop = loop;
-        lt.local_host = strdup("127.0.0.1");
-        lt.local_port = 80;
-
-        if (!request_localtunnel(&lt)) {
-            log("failed to request localtunnel");
-            cleanup_localtunnel(&lt);
-            return 1;
+    int opt;
+    while ((opt = getopt_long(argc, argv, "l:p:h:s:v", long_options, NULL)) != -1) {
+        switch (opt) {
+        case 'l':
+            lt.local_host = lt_strdup(optarg);
+            break;
+        case 'p':
+            lt.local_port = atoi(optarg);
+            break;
+        case 'h':
+            lt.host = lt_strdup(optarg);
+            break;
+        case 's':
+            lt.id = lt_strdup(optarg);
+            break;
+        case 'v':
+            _enable_log = true;
+            break;
+        case 0:
+            usage(argv[0]);
+            exit(0);
+        default:
+            usage(argv[0]);
+            exit(1);
         }
-
-        localtunnel_create_conn(&lt);
-
-        ev_run(loop, 0);
-
-        cleanup_localtunnel(&lt);
     }
 
+    if (!lt.local_port) {
+        lt.local_port = 8000;
+    }
+    if (!lt.host) {
+        lt.host = lt_strdup("localtunnel.me");
+    }
+    if (!lt.local_host) {
+        lt.local_host = lt_strdup("localhost");
+    }
+
+    curl_global_init(CURL_GLOBAL_ALL);
+    int exit_code = localtunnel_main(&lt);
+
+cleanup:
+    cleanup_localtunnel(&lt);
     curl_global_cleanup();
-    return 0;
+    return exit_code;
 }
