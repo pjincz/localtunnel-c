@@ -13,7 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
-#include <poll.h>
+#include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -21,6 +21,7 @@
 
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
+#include <ev.h>
 
 ////////////////////////////////////////////////////////////////////////////////
 // log
@@ -30,24 +31,24 @@
     struct tm *tm_info = localtime(&t); \
     char time_buf[20]; \
     strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info); \
-    fprintf(stderr, "%s " format "\n", time_buf, ##__VA_ARGS__); \
+    fprintf(stderr, "%s] " format "\n", time_buf, ##__VA_ARGS__); \
 } while (0)
 
 ////////////////////////////////////////////////////////////////////////////////
-// dyn_buf_t
+// lt_buf_t
 
 typedef struct {
     size_t size;
     size_t cap;
     char *buf;
-} dyn_buf_t;
+} lt_buf_t;
 
-void cleanup_buf(dyn_buf_t *buf) {
+void cleanup_buf(lt_buf_t *buf) {
     free(buf->buf);
 }
 
 size_t
-dyn_buf_write(const void *data, size_t size, size_t nmemb, dyn_buf_t *buf) {
+ls_buf_write(const void *data, size_t size, size_t nmemb, lt_buf_t *buf) {
     size_t new_size = buf->size + size * nmemb;
     if (new_size > buf->cap) {
         size_t new_cap = buf->cap ? buf->cap : new_size;
@@ -67,57 +68,89 @@ dyn_buf_write(const void *data, size_t size, size_t nmemb, dyn_buf_t *buf) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// framework
+// connection
+
+#define LT_CONN_ESTABLISHED  101
+#define LT_CONN_CONN_ERROR   102
+#define LT_CONN_READ_AVIL    103
+#define LT_CONN_WRITE_AVIL   104
+#define LT_CONN_HUP          105
+#define LT_CONN_CLOSE        106
+#define LT_CONN_DESTROY      107
+
+struct connection_s;
+
+typedef void (*lt_conn_callback)(struct connection_s*, void *, int);
+
+typedef struct writing_task_s {
+    char *data;
+    int len;
+    int written;
+
+    bool freedata;
+
+    struct writing_task_s *next;
+} writing_task_t;
+
+typedef struct lt_conn_handler_s {
+    lt_conn_callback cb;
+    void *data;
+
+    struct lt_conn_handler_s *next;
+} lt_conn_handler_t;
 
 typedef struct connection_s {
-    struct event_loop_s *ev;
+    // libev tools
+    struct ev_loop *loop;
+    ev_io watcher;
+    ev_idle idle;
 
+    // status
     int fd;
 
-    // read handler, will be invoked when data arrives
-    // if closing is set, it means not a normal read event, it's the last call
-    // of reader.
-    // if you don't want to read anything from connection, you can do
-    // connection_close_read() immediently after create connection.
-    void (*reader)(struct connection_s*, void *data, bool closing);
+    bool established;
+    bool closed;
+    bool destroying;
 
-    // write hander, will be invoked when writing buffer is available
-    // if closing is set, it means not a normal write event, it's the last call
-    // of writer.
-    // if you don't want to write anything to connection, you can do
-    // connection_close_write() immediently after create connection.
-    void (*writer)(struct connection_s*, void *data, bool closing);
+    bool pause_reading;
 
-    // user data
-    void *reader_data;
-    void *writer_data;
+    int lasterr;
 
-    // chain
-    struct connection_s *prev, *next;
+    // handler
+    lt_conn_handler_t *handler;
 
-    bool read_closed;
-    bool write_closed;
-    bool pending_read;
-    bool pending_write;
-} connection_t;
+    writing_task_t *writing_task;
+    writing_task_t *writing_task_last;
 
-typedef struct event_loop_s {
-    connection_t *first, *last;
-    bool closing;
+    // settings
+    bool auto_destroy;
+} lt_conn_t;
 
-    int slots;
-    struct pollfd *pfds;
-    connection_t **slot_map;
-} event_loop_t;
+void lt_conn_io_cb(EV_P_ ev_io *w, int revents);
+void lt_conn_destroy(lt_conn_t *conn);
 
-connection_t *
-create_connection(event_loop_t *ev, const char *host, int port) {
-    if (ev->closing) {
-        log("failed to create connection, ev is closing");
-        return NULL;
+void _lt_conn_restart_ev(lt_conn_t *conn) {
+    if (conn->closed) {
+        return;
     }
 
-    connection_t *conn = NULL;
+    if (ev_is_active(&conn->watcher)) {
+        ev_io_stop(conn->loop, &conn->watcher);
+    }
+    int events = 0;
+    if (!conn->pause_reading) {
+        events |= EV_READ;
+    }
+    if (conn->writing_task || !conn->established) {
+        events |= EV_WRITE;
+    }
+    ev_io_set(&conn->watcher, conn->fd, events);
+    ev_io_start(conn->loop, &conn->watcher);
+}
+
+lt_conn_t *
+lt_create_conn(struct ev_loop *loop, const char *host, int port) {
+    lt_conn_t *conn = NULL;
 
     struct addrinfo hints = {0};
     hints.ai_family = AF_UNSPEC;  // auto between ipv4 and ipv6
@@ -134,7 +167,7 @@ create_connection(event_loop_t *ev, const char *host, int port) {
         goto error;
     }
 
-    int fd;
+    int fd = -1;
     for (struct addrinfo *p = res; p; p = p->ai_next) {
         fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd < 0) {
@@ -168,28 +201,15 @@ create_connection(event_loop_t *ev, const char *host, int port) {
         log("malloc error");
         goto error;
     }
+    memset(conn, 0, sizeof(*conn));
 
-    conn->ev = ev;
+    conn->loop = loop;
     conn->fd = fd;
-    conn->reader = NULL;
-    conn->writer = NULL;
-    conn->reader_data = NULL;
-    conn->writer_data = NULL;
 
-    conn->next = NULL;
-    conn->prev = ev->last;
-    if (ev->last) {
-        ev->last->next = conn;
-    }
-    ev->last = conn;
-    if (!ev->first) {
-        ev->first = conn;
-    }
+    ev_io_init(&conn->watcher, lt_conn_io_cb, conn->fd, EV_READ | EV_WRITE);
+    conn->watcher.data = conn;
 
-    conn->read_closed = false;
-    conn->write_closed = false;
-    conn->pending_read = true;
-    conn->pending_write = true;
+    _lt_conn_restart_ev(conn);
 
     freeaddrinfo(res);
     return conn;
@@ -208,384 +228,294 @@ error:
     return NULL;
 }
 
-void
-_free_connection(connection_t *conn) {
-    event_loop_t *ev = conn->ev;
-    connection_t *prev = conn->prev;
-    connection_t *next = conn->next;
+void _lt_conn_run_handler(lt_conn_t *conn, int event) {
+    for (lt_conn_handler_t *h = conn->handler; h; h = h->next) {
+        h->cb(conn, h->data, event);
+    }
+}
 
-    if (prev) {
-        prev->next = next;
-    } else {
-        ev->first = next;
+void lt_conn_close(lt_conn_t *conn) {
+    if (conn->closed) {
+        return;        
+    }
+    conn->closed = true;
+
+    if (conn->established) {
+        _lt_conn_run_handler(conn, LT_CONN_HUP);
     }
 
-    if (next) {
-        next->prev = prev;
-    } else {
-        ev->last = prev;
-    }
-
+    _lt_conn_run_handler(conn, LT_CONN_CLOSE);
+    ev_io_stop(conn->loop, &conn->watcher);
     close(conn->fd);
+
+    if (conn->auto_destroy) {
+        lt_conn_destroy(conn);
+    }
+}
+
+void _lt_conn_destroy_cb(EV_P_ ev_idle *w, int revents) {
+    lt_conn_t *conn = w->data;
+    ev_idle_stop(conn->loop, w);
+
+    while (conn->handler) {
+        lt_conn_handler_t *h = conn->handler;
+        conn->handler = h->next;
+        free(h);
+    }
     free(conn);
 }
 
-void
-connection_close_read(connection_t *c) {
-    if (c->read_closed) {
-        log("connection read already closed");
+void lt_conn_destroy(lt_conn_t *conn) {
+    if (conn->destroying) {
         return;
     }
+    conn->destroying = true;
 
-    shutdown(c->fd, SHUT_RD);
+    lt_conn_close(conn);
 
-    if (c->reader) {
-        c->reader(c, c->reader_data, true);
-    }
+    _lt_conn_run_handler(conn, LT_CONN_DESTROY);
 
-    c->read_closed = true;
-    c->pending_read = false;
-
-    if (c->read_closed && c->write_closed) {
-        _free_connection(c);
-    }
+    ev_idle_init(&conn->idle, _lt_conn_destroy_cb);
+    conn->idle.data = conn;
+    ev_idle_start(conn->loop, &conn->idle);
 }
 
-void
-connection_close_write(connection_t *c) {
-    if (c->write_closed) {
-        log("connection write already closed");
-        return;
-    }
+void lt_conn_io_cb(EV_P_ ev_io *w, int revents) {
+    // log("revents = %x", revents);
 
-    shutdown(c->fd, SHUT_WR);
+    lt_conn_t *conn = w->data;
 
-    if (c->writer) {
-        c->writer(c, c->writer_data, true);
-    }
-
-    c->write_closed = true;
-    c->pending_write = false;
-
-    if (c->read_closed && c->write_closed) {
-        _free_connection(c);
-    }
-}
-
-void
-connection_pending_read(connection_t *c, bool v) {
-    if (v && c->read_closed) {
-        log("connection read already closed");
-        return;
-    }
-    c->pending_read = v;
-}
-
-void
-connection_pending_write(connection_t *c, bool v) {
-    if (v && c->write_closed) {
-        log("connection write already closed");
-        return;
-    }
-    c->pending_write = v;
-}
-
-event_loop_t *
-create_event_loop() {
-    event_loop_t *ev;
-    ev = malloc(sizeof(*ev));
-    if (!ev) {
-        return NULL;
-    }
-    memset(ev, 0, sizeof(*ev));
-    return ev;
-}
-
-void
-free_event_loop(event_loop_t *ev) {
-    ev->closing = true;
-
-    while (ev->first) {
-        connection_t *c = ev->first;
-        if (!c->read_closed) {
-            connection_close_read(c);
-        }
-        if (!c->write_closed) {
-            connection_close_write(c);
+    if (!conn->established) {
+        int err = 0;
+        socklen_t len = sizeof(err);
+        getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &err, &len);
+        if (err == 0) {
+            conn->established = 1;
+            _lt_conn_run_handler(conn, LT_CONN_ESTABLISHED);
+            _lt_conn_restart_ev(conn);
+        } else {
+            conn->lasterr = err;
+            _lt_conn_run_handler(conn, LT_CONN_CONN_ERROR);
+            lt_conn_close(conn);
+            return;
         }
     }
 
-    free(ev->pfds);
-    free(ev->slot_map);
-    free(ev);
-}
-
-// returns:
-//   <0: error
-//   0: nothing need to do anymore
-//   >0: good
-int do_poll(event_loop_t *ev) {
-    int slot = 0;
-    for (connection_t *c = ev->first; c; c = c->next, slot += 1) {
-        if (slot >= ev->slots) {
-            int new_slots = ev->slots ? ev->slots * 2 : 16;
-            struct pollfd *new_pfds = realloc(
-                ev->pfds, sizeof(struct pollfd) * new_slots);
-            if (!new_pfds) {
-                log("realloc error");
-                return -1;
-            }
-            ev->pfds = new_pfds;
-
-            connection_t **new_slot_map = realloc(
-                ev->slot_map, sizeof(connection_t*) * new_slots);
-            if (!new_slot_map) {
-                log("realloc error");
-                return -1;
-            }        
-            ev->slot_map = new_slot_map;
-
-            ev->slots = new_slots;
-        }
-
-        ev->pfds[slot].fd = c->fd;
-        ev->pfds[slot].events = POLLHUP | POLLERR;
-        if (c->pending_read) {
-            if (!c->reader) {
-                log("connectin pending read, but no reader");
-                log("If you don't want to read anything, you can invoke "
-                    "connection_close_read() immediently after creating "
-                    "connection.");
-                return -1;
-            }
-            ev->pfds[slot].events |= POLLIN;
-            // log("*%d wait reading", c->fd);
-        }
-        if (c->pending_write) {
-            if (!c->writer) {
-                log("connectin pending write, but no writer");
-                log("If you don't want to write anything, you can invoke "
-                    "connection_close_write() immediently after creating "
-                    "connection.");
-                return -1;
-            }
-            ev->pfds[slot].events |= POLLOUT;
-            // log("*%d wait writing", c->fd);
-        }
-        ev->slot_map[slot] = c;
-    }
-    int nslot = slot;
-
-    if (nslot == 0) {
-        return 0;
-    }
-
-    int ir = poll(ev->pfds, slot, -1);
-    if (ir < 0) {
-        log("poll error");
-        return ir;
-    }
-
-    for (int i = 0; i < nslot; ++i) {
-        short revents = ev->pfds[i].revents;
-        connection_t *c = ev->slot_map[i];
-
-        // It looks there's an known issue on Linux poll, sometimes even remote
-        // socket closed, even there's no data remain, Linux still keep set
-        // POLLIN instead of POLLHUP. Let's do a workaround here.
-        if (revents & POLLIN) {
-            int bytes_available = 0;
-            if (ioctl(c->fd, FIONREAD, &bytes_available) >= 0) {
-                if (bytes_available == 0) {
-                    revents = revents & ~POLLIN | POLLHUP;
+    if (revents & EV_WRITE) {
+        while (conn->writing_task) {
+            writing_task_t *task = conn->writing_task;
+            int nwrite = write(conn->fd, task->data + task->written,
+                               task->len - task->written);
+            if (nwrite < 0) {
+                if (errno == EAGAIN) {
+                    // writing buf full
+                    break;
+                } else {
+                    log("write error: %d", errno);
+                    return;
                 }
             }
-        }
 
-        if (revents & POLLIN) {
-            assert(c->reader);
-            c->reader(c, c->reader_data, false);
-        }
-        if (revents & POLLOUT) {
-            assert(c->writer);
-            c->writer(c, c->writer_data, false);
-        }
-        if (revents & (POLLHUP | POLLERR | POLLNVAL)) {
-            if (!c->read_closed) {
-                connection_close_read(c);
-            }
-            if (!c->write_closed) {
-                connection_close_write(c);
+            task->written += nwrite;
+            if (task->written == task->len) {
+                if (task->freedata) {
+                    free(task->data);
+                }
+                conn->writing_task = task->next;
+                if (!conn->writing_task) {
+                    conn->writing_task_last = NULL;
+                }
+                free(task);
             }
         }
+        _lt_conn_run_handler(conn, LT_CONN_WRITE_AVIL);
     }
-    return 1;
-}
 
-////////////////////////////////////////////////////////////////////////////////
-// pipe
+    if (revents & EV_READ) {
+        int available_bytes = -1;
+        if (ioctl(conn->fd, FIONREAD, &available_bytes) == -1) {
+            log("ioctl failed: %d", errno);
+            lt_conn_close(conn);
+            return;
+        }
 
-#define PIPE_BUF_SIZE (16*1024)
-
-typedef struct pipe_s {
-    connection_t *left;
-    connection_t *right;
-
-    bool left_closed;
-    bool right_closed;
-
-    void(*cleanup)(struct pipe_s*);
-    void *data;
-
-    char *mem;
-    char *mem_end;
-    char *buf;
-    char *buf_end;
-} pipe_t;
-
-void free_pipe(pipe_t *p) {
-    if (p->cleanup) {
-        p->cleanup(p);
-    }
-    free(p->mem);
-    free(p);
-}
-
-void pipe_writer(connection_t *c, void *data, bool closing) {
-    pipe_t *p = data;
-
-    if (closing) {
-        p->right_closed = true;
-        if (p->left_closed) {
-            free_pipe(p);
+        if (available_bytes == 0) {
+            lt_conn_close(conn);
+            return;
         } else {
-            connection_close_read(p->left);
+            _lt_conn_run_handler(conn, LT_CONN_READ_AVIL);
         }
-        return;
-    }
-
-    if (p->buf_end == p->buf) {
-        // nothing to write
-        connection_pending_write(p->right, false);
-        return;
-    }
-
-    int nwrite = write(p->right->fd, p->buf, p->buf_end - p->buf);
-    if (nwrite < 0) {
-        log("write error");
-        return;
-    } else if (nwrite > 0) {
-        p->buf += nwrite;
-        if (p->buf == p->buf_end) {
-            p->buf = p->buf_end = p->mem;
-        }
-        connection_pending_read(p->left, p->buf_end != p->mem_end);
-        connection_pending_write(p->right, p->buf_end != p->buf);
     }
 }
 
-void pipe_reader(connection_t *c, void *data, bool closing) {
-    pipe_t *p = data;
+void lt_conn_pause_read(lt_conn_t *conn, bool b) {
+    if (conn->pause_reading == b) {
+        return;
+    }
 
-    if (closing) {
-        p->left_closed = true;
-        if (p->right_closed) {
-            free_pipe(p);
-        } else {
-            if (p->buf == p->buf_end) {
-                connection_close_write(p->right);
+    _lt_conn_restart_ev(conn);
+}
+
+bool lt_conn_write(lt_conn_t *conn, char *data, int len, bool freedata) {
+    int nwrite = 0;
+
+    if (!conn->writing_task) {
+        nwrite = write(conn->fd, data, len);
+        if (nwrite < 0) {
+            if (errno == EAGAIN) {
+                nwrite = 0;
+            } else {
+                goto error;
             }
         }
-        return;
     }
 
-    int nrem = p->mem_end - p->buf_end;
-    int nread = read(p->left->fd, p->buf_end, nrem);
-    if (nread < 0) {
-        log("read error");
-        return;
-    } else if (nread > 0) {
-        p->buf_end += nread;
-        pipe_writer(p->right, p->right->writer_data, 0);
+    if (nwrite == len) {
+        if (freedata) {
+            free(data);
+        }
+        return true;
+    }
+
+    writing_task_t *task = malloc(sizeof(*task));
+    if (!task) {
+        goto error;
+    }
+    task->data = data;
+    task->len = len;
+    task->written = nwrite;
+    task->freedata = freedata;
+    task->next = NULL;
+
+    if (conn->writing_task_last) {
+        conn->writing_task_last->next = task;
+    } else {
+        conn->writing_task = conn->writing_task_last = task;
+    }
+
+    return true;
+
+error:
+    if (freedata) {
+        free(data);
+    }
+    return false;
+}
+
+lt_conn_handler_t * 
+lt_conn_add_handler(lt_conn_t *conn, lt_conn_callback cb, void *data) {
+    lt_conn_handler_t *h = malloc(sizeof(*h));
+    if (!h) {
+        log("malloc failed");
+        return NULL;
+    }
+    h->cb = cb;
+    h->data = data;
+    h->next = NULL;
+
+    h->next = conn->handler;
+    conn->handler = h;
+
+    return h;
+}
+
+void lt_conn_pipe_left_cb(lt_conn_t *left, void *data, int event) {
+    lt_conn_t *right = data;
+
+    if (event == LT_CONN_READ_AVIL) {
+        int available_bytes = -1;
+        if (ioctl(left->fd, FIONREAD, &available_bytes) == -1) {
+            log("ioctl failed: %d", errno);
+            lt_conn_close(left);
+            lt_conn_close(right);
+            return;
+        }
+
+        if (available_bytes > 0) {
+            char *buf = malloc(available_bytes);
+            if (!buf) {
+                log("malloc failed");
+                lt_conn_close(left);
+                lt_conn_close(right);
+                return;
+            }
+            int nread = read(left->fd, buf, available_bytes);
+            if (!lt_conn_write(right, buf, nread, true)) {
+                log("lt_conn_write failed");
+                lt_conn_close(left);
+                lt_conn_close(right);
+                return;
+            }
+
+            lt_conn_pause_read(left, right->writing_task ? true : false);
+        }
+    } else if (event == LT_CONN_CLOSE) {
+        lt_conn_close(right);
     }
 }
 
-pipe_t *
-pipe_connections(connection_t *left, connection_t *right) {
-    if (left->read_closed) {
-        log("left connection already closed read");
-        return NULL;
+void lt_conn_pipe_right_cb(lt_conn_t *right, void *data, int event) {
+    lt_conn_t *left = data;
+
+    if (event == LT_CONN_WRITE_AVIL) {
+        lt_conn_pause_read(left, false);
+    } else if (event == LT_CONN_CLOSE) {
+        lt_conn_close(left);
     }
-    if (right->write_closed) {
-        log("right connection already closed write");
-        return NULL;
+}
+
+bool lt_conn_pipe_to(lt_conn_t *left, lt_conn_t *right) {
+    if (!lt_conn_add_handler(left, lt_conn_pipe_left_cb, right)) {
+        log("lt_conn_add_handler failed");
+        return false;
     }
-
-    pipe_t *p = malloc(sizeof(*p));
-    if (!p) {
-        log("malloc error");
-        return NULL;
+    if (!lt_conn_add_handler(right, lt_conn_pipe_right_cb, left)) {
+        log("lt_conn_add_handler failed");
+        return false;
     }
-    p->left = left;
-    p->right = right;
-
-    p->left_closed = false;
-    p->right_closed = false;
-
-    p->cleanup = NULL;
-    p->data = NULL;
-
-    p->mem = malloc(PIPE_BUF_SIZE);
-    if (!p->mem) {
-        log("malloc error");
-        free(p);
-        return NULL;
-    }
-    p->mem_end = p->mem + PIPE_BUF_SIZE;
-
-    p->buf = p->buf_end = p->mem;
-
-    left->reader = pipe_reader;
-    left->reader_data = p;
-    right->writer = pipe_writer;
-    right->writer_data = p;
-
-    return p;
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // localtunnel
 
-typedef struct {
-    char *id;
-    char *host;
-    int port;
-    int max_conn_count;
-    char *url;
+#define MAX_CONSECUTIVE_ERRORS 3
+#define MIN_CONNS              4
+#define MIN_IDLE_CONNS         1
 
-    event_loop_t *ev;
-    int conns;
+typedef struct {
+    struct ev_loop *loop;
+
+    char *remote_host;
+    int remote_port;
+
+    char *local_host;
+    int local_port;
+
+    char *id;
+    char *url;
+    int max_conn_count;
+
+    // running status
+    int conn_connecting;
+    int conn_idle;
+    int conn_in_use;
+    int consecutive_errors;
 } localtunnel_t;
 
-void localtunnel_remote_reader(connection_t *c, void *data, bool closing);
-void localtunnel_remote_writer(connection_t *c, void *data, bool closing);
+typedef struct {
+    localtunnel_t *lt;
+    lt_conn_t *remote;
+    lt_conn_t *local;
+} localtunnel_conn_t;
+
+localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt);
 
 void cleanup_localtunnel(localtunnel_t *lt) {
-    if (lt->ev) {
-        free_event_loop(lt->ev);
-    }
-
+    free(lt->remote_host);
+    free(lt->local_host);
     free(lt->id);
-    free(lt->host);
     free(lt->url);
-}
-
-void dump_tunneltunnel(localtunnel_t *lt) {
-    printf("id: %s\n", lt->id ? lt->id : "");
-    printf("host: %s\n", lt->host ? lt->host : "");
-    printf("port: %d\n", lt->port);
-    printf("max_conn_count: %d\n", lt->max_conn_count);
-    printf("url: %s\n", lt->url ? lt->url : "");
 }
 
 bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
@@ -607,7 +537,7 @@ bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
     }
 
     if (port && port->type == cJSON_Number) {
-        lt->port = port->valueint;
+        lt->remote_port = port->valueint;
     } else {
         log("no port in response");
         goto cleanup;
@@ -637,17 +567,17 @@ bool request_localtunnel(localtunnel_t *lt) {
     CURL *curl = NULL;
     bool br = false;
     char url[1024];
-    dyn_buf_t resp = {0};
+    lt_buf_t resp = {0};
 
-    if (!lt->host) {
-        lt->host = strdup("localtunnel.me");
-        if (!lt->host) {
+    if (!lt->remote_host) {
+        lt->remote_host = strdup("localtunnel.me");
+        if (!lt->remote_host) {
             log("strdup failed");
             goto cleanup;
         }
     }
 
-    snprintf(url, sizeof(url), "https://%s/?new", lt->host);
+    snprintf(url, sizeof(url), "https://%s/?new", lt->remote_host);
 
     curl = curl_easy_init();
     if (!curl) {
@@ -657,15 +587,22 @@ bool request_localtunnel(localtunnel_t *lt) {
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, dyn_buf_write);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, ls_buf_write);
 
+    log("requesting localtunel");
     CURLcode res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
         log("curl_easy_perform failed: %s", curl_easy_strerror(res));
         goto cleanup;
     }
+    log("localtunnel response: %.*s", (int)resp.size, resp.buf);
 
     br = parse_localtunnel_response(resp.buf, resp.size, lt);
+    if (br) {
+        printf("url: %s\n", lt->url);
+    } else {
+        log("failed to parse response");
+    }
 
 cleanup:
     cleanup_buf(&resp);
@@ -675,113 +612,189 @@ cleanup:
     return br;
 }
 
-connection_t *
-create_localtunnel_connection(localtunnel_t *lt) {
-    connection_t *remote = create_connection(lt->ev, lt->host, lt->port);
-    if (!remote) {
-        log("failed to create localtunnel connection");
+void localtunnel_local_cb(lt_conn_t *conn, void *data, int event) {
+    localtunnel_conn_t *ltc = data;
+    localtunnel_t *lt = ltc->lt;
+    if (event == LT_CONN_CONN_ERROR) {
+        log("*%d failed to connect to %s %d, error: %s",
+            conn->fd, lt->local_host, lt->local_port, strerror(conn->lasterr));
+    } else if (event == LT_CONN_DESTROY) {
+        ltc->local = NULL;
+        if (!ltc->remote && !ltc->local) {
+            free(ltc);
+        }
+    }
+}
+
+void localtunnel_try_create_more_connection(localtunnel_t *lt) {
+    int total_conns = lt->conn_connecting + lt->conn_idle + lt->conn_in_use;
+    if (total_conns < lt->max_conn_count) {
+        if (total_conns < MIN_CONNS || lt->conn_idle < MIN_IDLE_CONNS) {
+            // create more connections
+            localtunnel_create_conn(lt);
+        }
+    }
+}
+
+void localtunnel_cb(lt_conn_t *conn, void *data, int event) {
+    localtunnel_conn_t *ltc = data;
+    localtunnel_t *lt = ltc->lt;
+
+    if (event == LT_CONN_ESTABLISHED) {
+        log("*%d established", conn->fd);
+
+        lt->conn_connecting -= 1;
+        lt->conn_idle += 1;
+        lt->consecutive_errors = 0;
+
+        localtunnel_try_create_more_connection(lt);
+    } else if (event == LT_CONN_CONN_ERROR) {
+        log("*%d failed to connect to %s %d, error: %s",
+            conn->fd, lt->remote_host, lt->remote_port,
+            strerror(conn->lasterr));
+        
+        lt->conn_connecting -= 1;
+        lt->consecutive_errors += 1;
+        if (lt->consecutive_errors >= MAX_CONSECUTIVE_ERRORS) {
+            log("max consecutive errors reached, exit");
+            exit(1);
+        } else {
+            // retry
+            localtunnel_create_conn(lt);
+        }
+    } else if (event == LT_CONN_READ_AVIL) {
+        if (!ltc->local) {
+            ltc->local = lt_create_conn(
+                conn->loop, lt->local_host, lt->local_port);
+            if (!ltc->local) {
+                log("failed to create local connection");
+                lt_conn_close(conn);
+                return;
+            }
+            ltc->local->auto_destroy = true;
+            if (!lt_conn_add_handler(ltc->local, localtunnel_local_cb, ltc)) {
+                log("lt_conn_add_handler failed");
+                lt_conn_close(ltc->local);
+                lt_conn_close(ltc->remote);
+                return;
+            }
+            if (!lt_conn_pipe_to(ltc->remote, ltc->local)
+                || !lt_conn_pipe_to(ltc->local, ltc->remote))
+            {
+                log("failed to bridge connections");
+                lt_conn_close(ltc->local);
+                lt_conn_close(ltc->remote);
+                return;
+            }
+            log("*%d bridged: %d<=>%d",
+                ltc->remote->fd, ltc->remote->fd, ltc->local->fd);
+            
+            lt->conn_idle -= 1;
+            lt->conn_in_use += 1;
+            localtunnel_try_create_more_connection(lt);
+        }
+    } else if (event == LT_CONN_HUP) {
+        if (ltc->local) {
+            log("*%d<=>%d closed", ltc->remote->fd, ltc->local->fd);
+            lt->conn_in_use -= 1;
+        } else {
+            log("*%d closed", ltc->remote->fd);
+            lt->conn_idle -= 1;
+        }
+        localtunnel_try_create_more_connection(lt);
+    } else if (event == LT_CONN_DESTROY) {
+        ltc->remote = NULL;
+        if (!ltc->remote && !ltc->local) {
+            free(ltc);
+        }
+    }
+}
+
+localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt) {
+    localtunnel_conn_t *ltc = malloc(sizeof(*ltc));
+    if (!ltc) {
+        log("malloc failed");
+        return NULL;
+    }
+    memset(ltc, 0, sizeof(*ltc));
+
+    ltc->lt = lt;
+    ltc->remote = lt_create_conn(lt->loop, lt->remote_host, lt->remote_port);
+    if (!ltc->remote) {
+        log("failed to create connection");
+        free(ltc);
+        return NULL;
+    }
+    ltc->remote->auto_destroy = true;
+    if (!lt_conn_add_handler(ltc->remote, localtunnel_cb, ltc)) {
+        log("lt_conn_add_handler failed");
+        lt_conn_close(ltc->remote);
+        free(ltc);
         return NULL;
     }
 
-    remote->reader = localtunnel_remote_reader;
-    remote->reader_data = lt;
-    remote->writer = localtunnel_remote_writer;
-    remote->writer_data = lt;
-    lt->conns += 1;
-}
+    lt->conn_connecting += 1;
+    log("*%d initialized to %s %d",
+        ltc->remote->fd, lt->remote_host, lt->remote_port);
 
-void localtunnel_pipe_cleanup(pipe_t *p) {
-    localtunnel_t *lt = p->data;
-    log("connection %d <=> %d closed", p->left->fd, p->right->fd);
-
-    // create a new one, when one exits
-    if (!lt->ev->closing) {
-        create_localtunnel_connection(lt);
-    }
-    // TODO: if failed, delay retry
-}
-
-void localtunnel_remote_reader(connection_t *c, void *data, bool closing) {
-    localtunnel_t *lt = data;
-
-    if (closing) {
-        log("connection %d closed", c->fd);
-
-        // create a new one, when one exits
-        if (!lt->ev->closing) {
-            create_localtunnel_connection(lt);
-        }
-        // TODO: if failed, delay retry
-
-        return;
-    }
-
-    connection_t *local = create_connection(c->ev, "127.0.0.1", 80);
-    if (!local) {
-        log("failed to create local connection");
-        connection_close_read(c);
-        connection_close_write(c);
-        return;
-    }
-    
-    pipe_t *forward = pipe_connections(c, local);
-    pipe_t *backward = pipe_connections(local, c);
-    if (!forward || !backward) {
-        log("failed to bridge %d <=> %d", c->fd, local->fd);
-        connection_close_read(c);
-        connection_close_write(c);
-        return;
-    }
-
-    // only set cleanup on one direction
-    forward->cleanup = localtunnel_pipe_cleanup;
-    forward->data = lt;
-
-    log("connection bridged %d <=> %d", c->fd, local->fd);
-}
-
-void localtunnel_remote_writer(connection_t *c, void *data, bool closing) {
-    localtunnel_t *lt = data;
-
-    if (closing) {
-        return;
-    }
-
-    log("connection %d established", c->fd);
-    connection_pending_write(c, false);
+    return ltc;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // main
 
-int main(int argc, char *argv[]) {
-    curl_global_init(CURL_GLOBAL_ALL);
-
-    localtunnel_t lt = {0};
-    if (!request_localtunnel(&lt)) {
-        log("failed to request localtunnel");
-        return 1;
-    }
-    dump_tunneltunnel(&lt);
-
-    lt.ev = create_event_loop();
-    if (!lt.ev) {
-        log("failed to create event loop");
-        return 1;
-    }
-
-    create_localtunnel_connection(&lt);
-
-    while (true) {
-        int ir = do_poll(lt.ev);
-        if (ir < 0) {
-            return 1;
-        } else if (ir == 0) {
-            break;
+void dump_conn_cb(lt_conn_t *conn, void *data, int event) {
+    if (event == LT_CONN_READ_AVIL) {
+        char buf[8192];
+        int nread = read(conn->fd, buf, sizeof(buf));
+        if (nread < 0) {
+            if (errno != EAGAIN) {
+                log("read error: %d", errno);
+            }
+            return;
+        } else if (nread > 0) {
+            printf("%.*s", nread, buf);
         }
     }
+}
 
-    cleanup_localtunnel(&lt);
+int main(int argc, char *argv[]) {
+    struct ev_loop *loop = EV_DEFAULT;
+
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    // lt_conn_t * conn = lt_create_conn(loop, "baidu.com", 80);
+    // conn->auto_destroy = true;
+    // lt_conn_add_handler(conn, dump_conn_cb, NULL);
+
+    // char req[] = "GET / HTTP/1.1\r\n"
+    //              "Host: baidu.com\r\n"
+    //              "User-Agent: curl/8.5.0\r\n"
+    //              "Accept: */*\r\n"
+    //              "Connection: close\r\n"
+    //              "\r\n";
+    // lt_conn_write(conn, req, sizeof(req), false);
+    // ev_run(loop, 0);
+
+    {
+        localtunnel_t lt = {0};
+        lt.loop = loop;
+        lt.local_host = strdup("127.0.0.1");
+        lt.local_port = 80;
+
+        if (!request_localtunnel(&lt)) {
+            log("failed to request localtunnel");
+            cleanup_localtunnel(&lt);
+            return 1;
+        }
+
+        localtunnel_create_conn(&lt);
+
+        ev_run(loop, 0);
+
+        cleanup_localtunnel(&lt);
+    }
+
     curl_global_cleanup();
     return 0;
 }
