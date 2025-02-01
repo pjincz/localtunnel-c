@@ -50,17 +50,21 @@ cmake .
 make
 ```
 
-You can run `make install` to install localtunnel to /usr/local/bin, if you like it.
+You can run `make install` to install `localtunnel` to `/usr/local/bin`, if you
+like it.
 
 ## How to use
 
-For example, if you have a local http server listen on :8000, just run:
+For example, if you want to expose local http server `:8000`, just run:
 
 ```sh
 ./localtunnel -p 8000
 ```
 
-Then you will get a link like `https://short-taxes-stick.loca.lt`. Just curl it,
+Then you will get a link like `https://short-taxes-stick.loca.lt`. Try curl it,
 that's all.
 
-Run `./localtunnel --help` for more options.
+For more usage, try:
+```sh
+./localtunnel --help
+```
