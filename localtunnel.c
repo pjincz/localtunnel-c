@@ -39,13 +39,21 @@ static bool _enable_log = false;
     } \
 } while (0)
 
+#define log_err(format, ...) do { \
+    time_t t = time(NULL); \
+    struct tm *tm_info = localtime(&t); \
+    char time_buf[20]; \
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info); \
+    fprintf(stderr, "%s] " format "\n", time_buf, ##__VA_ARGS__); \
+} while (0)
+
 ////////////////////////////////////////////////////////////////////////////////
 // alloc
 
 void *lt_alloc_and_clean(int len) {
     void *mem = malloc(len);
     if (!mem) {
-        log("crit error, malloc failed");
+        log_err("crit error, malloc failed");
         exit(1);
     }
     memset(mem, 0, len);
@@ -58,7 +66,7 @@ void *lt_alloc_and_clean(int len) {
 char *lt_strdup(const char* str) {
     char *s2 = strdup(str);
     if (!s2) {
-        log("crit error, strdup failed");
+        log_err("crit error, strdup failed");
         exit(1);
     }
     return s2;
@@ -87,7 +95,7 @@ ls_buf_write(const void *data, size_t size, size_t nmemb, lt_buf_t *buf) {
         }
         buf->buf = realloc(buf->buf, new_cap);
         if (!buf->buf) {
-            log("realloc failed");
+            log_err("realloc failed");
             return 0;
         }
         buf->cap = new_cap;
@@ -193,7 +201,7 @@ lt_create_conn(struct ev_loop *loop, const char *host, int port) {
 
     struct addrinfo *res = NULL;
     if (getaddrinfo(host, port_str, &hints, &res) != 0) {
-        log("getaddrinfo failed");
+        log_err("getaddrinfo failed");
         goto error;
     }
 
@@ -206,7 +214,7 @@ lt_create_conn(struct ev_loop *loop, const char *host, int port) {
         
         // set non-blocking io 
         if (fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0) {
-            log("fcntl failed");
+            log_err("fcntl failed");
             goto error;
         }
 
@@ -214,13 +222,13 @@ lt_create_conn(struct ev_loop *loop, const char *host, int port) {
         int keepalive = 1;
         if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive,
                    sizeof(keepalive)) < 0) {
-            log("setsockopt failed");
+            log_err("setsockopt failed");
             goto error;
         }
 
         if (connect(fd, p->ai_addr, p->ai_addrlen) < 0) {
             if (errno != EINPROGRESS) {
-                log("connect failed, %d", errno);
+                log_err("connect failed, %d", errno);
                 goto error;
             }
         }
@@ -306,8 +314,6 @@ void lt_conn_destroy(lt_conn_t *conn) {
 }
 
 void lt_conn_io_cb(EV_P_ ev_io *w, int revents) {
-    // log("revents = %x", revents);
-
     lt_conn_t *conn = w->data;
 
     if (!conn->established) {
@@ -336,7 +342,7 @@ void lt_conn_io_cb(EV_P_ ev_io *w, int revents) {
                     // writing buf full
                     break;
                 } else {
-                    log("write error: %d", errno);
+                    log_err("write error: %d", errno);
                     return;
                 }
             }
@@ -359,7 +365,7 @@ void lt_conn_io_cb(EV_P_ ev_io *w, int revents) {
     if (revents & EV_READ) {
         int available_bytes = -1;
         if (ioctl(conn->fd, FIONREAD, &available_bytes) == -1) {
-            log("ioctl failed: %d", errno);
+            log_err("ioctl failed: %d", errno);
             lt_conn_close(conn);
             return;
         }
@@ -441,7 +447,7 @@ void lt_conn_pipe_left_cb(lt_conn_t *left, void *data, int event) {
     if (event == LT_CONN_READ_AVIL) {
         int available_bytes = -1;
         if (ioctl(left->fd, FIONREAD, &available_bytes) == -1) {
-            log("ioctl failed: %d", errno);
+            log_err("ioctl failed: %d", errno);
             lt_conn_close(left);
             lt_conn_close(right);
             return;
@@ -451,7 +457,7 @@ void lt_conn_pipe_left_cb(lt_conn_t *left, void *data, int event) {
             char *buf = lt_alloc_array(char, available_bytes);
             int nread = read(left->fd, buf, available_bytes);
             if (!lt_conn_write(right, buf, nread, true)) {
-                log("lt_conn_write failed");
+                log_err("lt_conn_write failed");
                 lt_conn_close(left);
                 lt_conn_close(right);
                 return;
@@ -534,7 +540,7 @@ bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
 
     cJSON *json = cJSON_ParseWithLength(resp, len);
     if (!json) {
-        log("bad response");
+        log_err("failed to parse response: %.*s", len, resp);
         goto cleanup;
     }
 
@@ -558,7 +564,7 @@ bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
     if (port && port->type == cJSON_Number) {
         lt->remote_port = port->valueint;
     } else {
-        log("no port in response");
+        log_err("no port in response");
         goto cleanup;
     }
 
@@ -571,7 +577,7 @@ bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
     if (url && url->type == cJSON_String) {
         lt->url = lt_strdup(url->valuestring);
     } else {
-        log("no url in response");
+        log_err("no url in response");
         goto cleanup;
     }
 
@@ -600,7 +606,7 @@ bool request_localtunnel(localtunnel_t *lt) {
 
     curl = curl_easy_init();
     if (!curl) {
-        log("curl_easy_init failed");
+        log_err("curl_easy_init failed");
         goto cleanup;
     }
 
@@ -611,7 +617,7 @@ bool request_localtunnel(localtunnel_t *lt) {
     log("requesting localtunel");
     CURLcode res = curl_easy_perform(curl);
     if (res != CURLE_OK) {
-        log("curl_easy_perform failed: %s", curl_easy_strerror(res));
+        log_err("curl_easy_perform failed: %s", curl_easy_strerror(res));
         goto cleanup;
     }
     log("localtunnel response: %.*s", (int)resp.size, resp.buf);
@@ -623,7 +629,7 @@ bool request_localtunnel(localtunnel_t *lt) {
             printf("Your cached URL is: %s\n", lt->cached_url);
         }
     } else {
-        log("failed to parse response");
+        log_err("failed to parse response");
     }
 
 cleanup:
@@ -638,7 +644,7 @@ void localtunnel_local_cb(lt_conn_t *conn, void *data, int event) {
     localtunnel_conn_t *ltc = data;
     localtunnel_t *lt = ltc->lt;
     if (event == LT_CONN_CONN_ERROR) {
-        log("*%d failed to connect to %s %d, error: %s",
+        log_err("*%d failed to connect to %s %d, error: %s",
             conn->fd, lt->local_host, lt->local_port, strerror(conn->lasterr));
     } else if (event == LT_CONN_DESTROY) {
         ltc->local = NULL;
@@ -671,14 +677,14 @@ void localtunnel_cb(lt_conn_t *conn, void *data, int event) {
 
         localtunnel_try_create_more_connection(lt);
     } else if (event == LT_CONN_CONN_ERROR) {
-        log("*%d failed to connect to %s %d, error: %s",
+        log_err("*%d failed to connect to %s %d, error: %s",
             conn->fd, lt->remote_host, lt->remote_port,
             strerror(conn->lasterr));
         
         lt->conn_connecting -= 1;
         lt->consecutive_errors += 1;
         if (lt->consecutive_errors >= MAX_CONSECUTIVE_ERRORS) {
-            log("max consecutive errors reached, exit");
+            log_err("max consecutive errors reached, exit");
             exit(1);
         } else {
             // retry
@@ -689,7 +695,7 @@ void localtunnel_cb(lt_conn_t *conn, void *data, int event) {
             ltc->local = lt_create_conn(
                 conn->loop, lt->local_host, lt->local_port);
             if (!ltc->local) {
-                log("failed to create local connection");
+                log_err("failed to create local connection");
                 lt_conn_close(conn);
                 return;
             }
@@ -728,7 +734,7 @@ localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt) {
     ltc->lt = lt;
     ltc->remote = lt_create_conn(lt->loop, lt->remote_host, lt->remote_port);
     if (!ltc->remote) {
-        log("failed to create connection");
+        log_err("failed to create connection");
         free(ltc);
         return NULL;
     }
@@ -747,12 +753,12 @@ localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt) {
 
 int localtunnel_main(localtunnel_t *lt) {
     if (!request_localtunnel(lt)) {
-        log("failed to request localtunnel");
+        log_err("failed to request localtunnel");
         return 1;
     }
 
     if (!localtunnel_create_conn(lt)) {
-        log("failed to initialize connection");
+        log_err("failed to initialize connection");
         return 1;
     }
 
