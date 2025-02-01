@@ -489,7 +489,7 @@ void lt_conn_pipe_to(lt_conn_t *left, lt_conn_t *right) {
 // localtunnel
 
 #define MAX_CONSECUTIVE_ERRORS 3
-#define MIN_CONNS              4
+#define MIN_CONNS              3
 #define MIN_IDLE_CONNS         1
 #define DEFAULT_MAX_CONN       4
 
