@@ -27,25 +27,30 @@ debuild -us -uc
 
 deb file will be generated in parent directory.
 
-## How to build (Common Linux)
+## How to build
 
-Localtunnel-c needs following libraries to build:
+Install dependencies first.
 
-* libev
-* libcjson
-* libcurl
+Ubuntu/Debian:
+```sh
+sudo apt install cmake libev-dev libcurl4-gnutls-dev  libcjson-dev
+```
 
-Install those dependencies by `apt` or `yum` or whatever. Then
+Mac OS:
+```sh
+brew install cmake libev  cjson
+```
 
+Built it:
 ```sh
 git clone https://github.com/pjincz/localtunnel-c
 
 cd localtunnel-c
+cmake .
 make
-
-# if you like to, this will install localtunnel to /usr/local/bin
-sudo make install
 ```
+
+You can run `make install` to install localtunnel to /usr/local/bin, if you like it.
 
 ## How to use
 
