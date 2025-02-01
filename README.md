@@ -14,7 +14,9 @@ See <https://github.com/localtunnel/localtunnel> for more details.
 * Doesn't support local https server. Because it looks nonsense.
 * Be more stingy with link creation to save server resource.
 
-## How to build (Debian / Ubuntu)
+## How to build
+
+### Debian, Ubuntu
 
 ```sh
 git clone https://github.com/pjincz/localtunnel-c
@@ -27,7 +29,7 @@ debuild -us -uc
 
 deb file will be generated in parent directory.
 
-## How to build
+### Common Linux, MacOS
 
 Install dependencies first.
 
@@ -50,8 +52,35 @@ cmake .
 make
 ```
 
-You can run `make install` to install `localtunnel` to `/usr/local/bin`, if you
-like it.
+### Windows
+
+Download and install msys2: <https://www.msys2.org/>
+
+Launch `msys2 UCRT64`.
+(You can also use other one if you prefer, don't forget to change ucrt strings below)
+
+Install dependencies:
+```sh
+pacman -S git gcc cmake make libcurl-devel libzstd-devel mingw-w64-ucrt-x86_64-cjson
+```
+
+Install libev:
+```sh
+git clone https://github.com/enki/libev
+cd libev
+./configure
+make
+make install
+cd ..
+```
+
+Build localtunnel:
+```sh
+git clone https://github.com/pjincz/localtunnel-c
+cd localtunnel-c
+CPATH=/ucrt64/include LIBRARY_PATH=/ucrt64/lib cmake .
+make
+```
 
 ## How to use
 
