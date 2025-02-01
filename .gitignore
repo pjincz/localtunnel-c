@@ -9,6 +9,7 @@
 /debian/.debhelper/
 /debian/debhelper-build-stamp
 /debian/localtunnel/
+/obj-*/
 
 # cmake generated files
 /CMakeFiles/

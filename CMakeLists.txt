@@ -31,3 +31,5 @@ target_link_libraries(
     ${LIBEV_LIBRARIES} 
     ${CJSON_LIBRARIES}
 )
+
+install(TARGETS localtunnel)
