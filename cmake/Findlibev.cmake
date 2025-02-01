@@ -1,9 +1,31 @@
-find_path(LIBEV_INCLUDE_DIR NAMES ev.h PATHS @PACKAGE_INCLUDE_INSTALL_DIR@)
+find_path(
+    LIBEV_INCLUDE_DIR
+    NAMES ev.h
+    PATHS
+        /usr/include
+        /usr/local/include
+        /opt/homebrew/include
+        /ucrt64/include
+        ENV CPATH
+)
 
-find_library(LIBEV_LIBRARY NAMES ev PATHS @PACKAGE_LIB_INSTALL_DIR@)
+find_library(
+    LIBEV_LIBRARY
+    NAMES ev
+    PATHS
+        /usr/lib
+        /usr/local/lib
+        /opt/homebrew/lib
+        /ucrt64/lib
+        ENV LIBRARY_PATH
+)
 
-if (LIBEV_INCLUDE_DIR AND LIBEV_LIBRARY)
-    set(LIBEV_FOUND TRUE)
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(
+    libev DEFAULT_MSG LIBEV_LIBRARY LIBEV_INCLUDE_DIR
+)
+
+if (LIBEV_FOUND)
     set(LIBEV_LIBRARIES ${LIBEV_LIBRARY})
     set(LIBEV_INCLUDE_DIRS ${LIBEV_INCLUDE_DIR})
 
@@ -14,7 +36,4 @@ if (LIBEV_INCLUDE_DIR AND LIBEV_LIBRARY)
             INTERFACE_INCLUDE_DIRECTORIES "${LIBEV_INCLUDE_DIR}"
         )
     endif()
-else()
-    set(LIBEV_FOUND FALSE)
-    message(FATAL_ERROR "libev not found")
 endif()

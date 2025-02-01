@@ -1,21 +1,29 @@
-find_path(CJSON_INCLUDE_DIR NAMES cjson/cJSON.h
+find_path(
+    CJSON_INCLUDE_DIR
+    NAMES cjson/cJSON.h
     PATHS
         /usr/include
         /usr/local/include
         /opt/homebrew/include
+        /ucrt64/include
         ENV CPATH
 )
 
-find_library(CJSON_LIBRARY NAMES cjson
+find_library(
+    CJSON_LIBRARY
+    NAMES cjson
     PATHS
         /usr/lib
         /usr/local/lib
         /opt/homebrew/lib
+        /ucrt64/lib
         ENV LIBRARY_PATH
 )
 
 include(FindPackageHandleStandardArgs)
-find_package_handle_standard_args(CJSON DEFAULT_MSG CJSON_LIBRARY CJSON_INCLUDE_DIR)
+find_package_handle_standard_args(
+    CJSON DEFAULT_MSG CJSON_LIBRARY CJSON_INCLUDE_DIR
+)
 
 if (CJSON_FOUND)
     set(CJSON_LIBRARIES ${CJSON_LIBRARY})
