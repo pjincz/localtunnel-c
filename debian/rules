@@ -8,11 +8,5 @@ include /usr/share/dpkg/default.mk
 %:
 	dh $@
 
-override_dh_auto_build:
-	$(MAKE)
-
-override_dh_auto_clean:
-	$(MAKE) clean
-
 override_dh_auto_install:
-	$(MAKE) install PREFIX=$(CURDIR)/debian/$(shell dh_listpackages)/usr
+	$(MAKE) install PREFIX=$(CURDIR)/debian/$(shell dh_listpackages)/usr INSTALL="install --strip-program=true"

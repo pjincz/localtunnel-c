@@ -1,4 +1,5 @@
 CC = cc
+INSTALL = install
 LDFLAGS = -lev -lcjson -lcurl
 PREFIX = /usr/local
 
@@ -19,7 +20,7 @@ clean:
 	rm -rf $(OUT)
 
 install:
-	install -D -m 755 localtunnel $(PREFIX)/bin/localtunnel
+	$(INSTALL) -D -m 755 localtunnel $(PREFIX)/bin/localtunnel
 
 run: $(OUT)
 	./$(OUT)
