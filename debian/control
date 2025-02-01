@@ -1,0 +1,23 @@
+Source: localtunnel
+Section: web
+Priority: optional
+Maintainer: Chizhong Jin <pjincz@gmail.com>
+Rules-Requires-Root: no
+Build-Depends:
+ debhelper-compat (= 13),
+ libev-dev,
+ libcjson-dev,
+ libcurl4-gnutls-dev | libcurl4-openssl-dev,
+Standards-Version: 4.6.2
+Homepage: https://github.com/pjincz/localtunnel-c
+
+Package: localtunnel
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: localtunnel
+ Localtunnel's c implementation. It allow users to expose themselves on internet
+ even after NAT.
+ .
+ See https://github.com/pjincz/localtunnel-c for more details.

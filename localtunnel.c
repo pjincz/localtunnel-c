@@ -86,7 +86,9 @@ void cleanup_buf(lt_buf_t *buf) {
 }
 
 size_t
-ls_buf_write(const void *data, size_t size, size_t nmemb, lt_buf_t *buf) {
+ls_buf_write(const void *ptr, size_t size, size_t nmemb, void *userdata) {
+    lt_buf_t *buf = userdata;
+
     size_t new_size = buf->size + size * nmemb;
     if (new_size > buf->cap) {
         size_t new_cap = buf->cap ? buf->cap : new_size;
@@ -100,7 +102,7 @@ ls_buf_write(const void *data, size_t size, size_t nmemb, lt_buf_t *buf) {
         }
         buf->cap = new_cap;
     }
-    memcpy(buf->buf + buf->size, data, size * nmemb);
+    memcpy(buf->buf + buf->size, ptr, size * nmemb);
     buf->size = new_size;
     return size * nmemb;
 }
