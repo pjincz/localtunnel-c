@@ -395,7 +395,7 @@ bool lt_conn_write(lt_conn_t *conn, char *data, int len, bool freedata) {
     if (!conn->writing_task) {
         nwrite = write(conn->fd, data, len);
         if (nwrite < 0) {
-            if (errno == EAGAIN) {
+            if (errno == EAGAIN || errno == ENOTCONN) {
                 nwrite = 0;
             } else {
                 goto error;
