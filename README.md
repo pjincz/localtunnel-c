@@ -29,18 +29,23 @@ debuild -us -uc
 
 deb file will be generated in parent directory.
 
-### Common Linux, MacOS
+### Common Linux, MacOS, FreeBSD
 
 Install dependencies first.
 
 Ubuntu/Debian:
 ```sh
-sudo apt install cmake libev-dev libcurl4-gnutls-dev  libcjson-dev
+sudo apt install git cmake libev-dev libcjson-dev libcurl4-gnutls-dev
 ```
 
 Mac OS:
 ```sh
-brew install cmake libev  cjson
+brew install git cmake libev cjson curl
+```
+
+FreeBSD:
+```sh
+sudo pkg install git cmake libev libcjson curl
 ```
 
 Built it:
