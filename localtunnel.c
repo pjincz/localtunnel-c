@@ -191,6 +191,7 @@ void _lt_conn_restart_ev(lt_conn_t *conn) {
 lt_conn_t *
 lt_create_conn(struct ev_loop *loop, const char *host, int port) {
     lt_conn_t *conn = NULL;
+    int fd = -1;
 
     struct addrinfo hints = {0};
     hints.ai_family = AF_UNSPEC;  // auto between ipv4 and ipv6
@@ -207,7 +208,6 @@ lt_create_conn(struct ev_loop *loop, const char *host, int port) {
         goto error;
     }
 
-    int fd = -1;
     for (struct addrinfo *p = res; p; p = p->ai_next) {
         fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd < 0) {
@@ -591,7 +591,7 @@ bool parse_localtunnel_response(const char *resp, int len, localtunnel_t *lt) {
 
 cleanup:
     cJSON_Delete(json);
-    return true;
+    return br;
 }
 
 bool request_localtunnel(localtunnel_t *lt) {
@@ -831,7 +831,6 @@ int main(int argc, char *argv[]) {
     curl_global_init(CURL_GLOBAL_ALL);
     int exit_code = localtunnel_main(&lt);
 
-cleanup:
     cleanup_localtunnel(&lt);
     curl_global_cleanup();
     return exit_code;

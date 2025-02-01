@@ -15,4 +15,4 @@ override_dh_auto_clean:
 	$(MAKE) clean
 
 override_dh_auto_install:
-	install -D -m 755 localtunnel debian/$(shell dh_listpackages)/usr/bin/localtunnel
+	$(MAKE) install PREFIX=$(CURDIR)/debian/$(shell dh_listpackages)/usr
