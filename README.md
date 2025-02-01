@@ -1,16 +1,17 @@
-# Localtunnel's C implementation
+# Localtunnel C implementation
 
 Localtunnel is a simple tool, can be used to quickly exposes your localhost to
-the world for easy testing and sharing! The original code is written by nodejs.
+the world for easy testing and sharing!
 
-This is a C implementation of localtunnel. It uses much less memory, so can be
-easily runs on resource-constrained devices (eg, router).
+The original code is written by nodejs. This is a C implementation of
+localtunnel. It uses much less resources, so can be easily runs on
+resource-constrained devices (eg, your home router).
 
 See <https://github.com/localtunnel/localtunnel> for more details.
 
 ## Difference with the official one
 
-* Doesn't support local https server. It looks nonsense.
+* Doesn't support local https server. Because it looks nonsense.
 * Be more stingy with link creation to save server resource.
 
 ## How to build (Debian / Ubuntu)
@@ -38,12 +39,13 @@ Install those dependencies by `apt` or `yum` or whatever. Then
 
 ```sh
 git clone https://github.com/pjincz/localtunnel-c
+
 cd localtunnel-c
 make
-```
 
-Then you can copy the output `localtunnel` to `/usr/local/bin` or whevever you
-like.
+# if you like to, this will install localtunnel to /usr/local/bin
+sudo make install
+```
 
 ## How to use
 
