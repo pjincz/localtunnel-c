@@ -169,14 +169,15 @@ typedef struct connection_s {
 void lt_conn_io_cb(EV_P_ ev_io *w, int revents);
 void lt_conn_destroy(lt_conn_t *conn);
 
-void _lt_conn_restart_ev(lt_conn_t *conn) {
+void _lt_conn_sync_ev(lt_conn_t *conn) {
+    if (ev_is_active(&conn->watcher)) {
+        ev_io_stop(conn->loop, &conn->watcher);
+    }
+
     if (conn->closed) {
         return;
     }
 
-    if (ev_is_active(&conn->watcher)) {
-        ev_io_stop(conn->loop, &conn->watcher);
-    }
     int events = 0;
     if (!conn->pause_reading) {
         events |= EV_READ;
@@ -244,7 +245,7 @@ lt_create_conn(struct ev_loop *loop, const char *host, int port) {
     ev_io_init(&conn->watcher, lt_conn_io_cb, conn->fd, EV_READ | EV_WRITE);
     conn->watcher.data = conn;
 
-    _lt_conn_restart_ev(conn);
+    _lt_conn_sync_ev(conn);
 
     freeaddrinfo(res);
     return conn;
@@ -264,8 +265,12 @@ error:
 }
 
 void _lt_conn_run_handler(lt_conn_t *conn, int event) {
+    bool io_event = event == LT_CONN_READ_AVIL || event == LT_CONN_WRITE_AVIL;
+
     for (lt_conn_handler_t *h = conn->handler; h; h = h->next) {
-        h->cb(conn, h->data, event);
+        if (!conn->closed || !io_event) {
+            h->cb(conn, h->data, event);
+        }
     }
 }
 
@@ -280,7 +285,7 @@ void lt_conn_close(lt_conn_t *conn) {
     }
 
     _lt_conn_run_handler(conn, LT_CONN_CLOSE);
-    ev_io_stop(conn->loop, &conn->watcher);
+    _lt_conn_sync_ev(conn);
     close(conn->fd);
 
     if (conn->auto_destroy) {
@@ -325,7 +330,7 @@ void lt_conn_io_cb(EV_P_ ev_io *w, int revents) {
         if (err == 0) {
             conn->established = 1;
             _lt_conn_run_handler(conn, LT_CONN_ESTABLISHED);
-            _lt_conn_restart_ev(conn);
+            _lt_conn_sync_ev(conn);
         } else {
             conn->lasterr = err;
             _lt_conn_run_handler(conn, LT_CONN_CONN_ERROR);
@@ -386,7 +391,7 @@ void lt_conn_pause_read(lt_conn_t *conn, bool b) {
         return;
     }
 
-    _lt_conn_restart_ev(conn);
+    _lt_conn_sync_ev(conn);
 }
 
 bool lt_conn_write(lt_conn_t *conn, char *data, int len, bool freedata) {
@@ -645,6 +650,7 @@ cleanup:
 void localtunnel_local_cb(lt_conn_t *conn, void *data, int event) {
     localtunnel_conn_t *ltc = data;
     localtunnel_t *lt = ltc->lt;
+
     if (event == LT_CONN_CONN_ERROR) {
         log_err("*%d failed to connect to %s %d, error: %s",
             conn->fd, lt->local_host, lt->local_port, strerror(conn->lasterr));
@@ -666,7 +672,7 @@ void localtunnel_try_create_more_connection(localtunnel_t *lt) {
     }
 }
 
-void localtunnel_cb(lt_conn_t *conn, void *data, int event) {
+void localtunnel_remote_cb(lt_conn_t *conn, void *data, int event) {
     localtunnel_conn_t *ltc = data;
     localtunnel_t *lt = ltc->lt;
 
@@ -741,7 +747,7 @@ localtunnel_conn_t *localtunnel_create_conn(localtunnel_t *lt) {
         return NULL;
     }
     ltc->remote->auto_destroy = true;
-    lt_conn_add_handler(ltc->remote, localtunnel_cb, ltc);
+    lt_conn_add_handler(ltc->remote, localtunnel_remote_cb, ltc);
 
     lt->conn_connecting += 1;
     log("*%d initialized to %s %d",
