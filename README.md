@@ -48,7 +48,7 @@ FreeBSD:
 sudo pkg install git cmake libev libcjson curl
 ```
 
-Built it:
+Build it:
 ```sh
 git clone https://github.com/pjincz/localtunnel-c
 
@@ -79,9 +79,10 @@ make install
 cd ..
 ```
 
-Build localtunnel:
+Build it:
 ```sh
 git clone https://github.com/pjincz/localtunnel-c
+
 cd localtunnel-c
 CPATH=/ucrt64/include LIBRARY_PATH=/ucrt64/lib cmake .
 make
