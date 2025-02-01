@@ -1,7 +1,17 @@
-lt: localtunnel.c
-	cc $< -lcurl -lcjson -lev -o lt -g -fsanitize=address
+CC = cc
+CLFAGS = -Wall
+LDFLAGS = -lev -lcjson -lcurl
 
-run: lt
-	./lt
+SRC = localtunnel.c
+OUT = localtunnel
 
-.PHONY: run
+$(OUT): $(SRC)
+	$(CC) $(CFLAGS) -o $(OUT) $(SRC) $(LDFLAGS)
+
+clean:
+	rm -rf $(OUT)
+
+run: $(OUT)
+	./$(OUT)
+
+.PHONY: clean run
