@@ -828,6 +828,8 @@ int main(int argc, char *argv[]) {
         lt.local_host = lt_strdup("localhost");
     }
 
+    printf("Exposing: http://%s:%d\n", lt.local_host, lt.local_port);
+
     curl_global_init(CURL_GLOBAL_ALL);
     int exit_code = localtunnel_main(&lt);
 
