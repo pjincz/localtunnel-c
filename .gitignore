@@ -9,3 +9,9 @@
 /debian/.debhelper/
 /debian/debhelper-build-stamp
 /debian/localtunnel/
+
+# cmake generated files
+/CMakeFiles/
+/CMakeCache.txt
+/Makefile
+/cmake_install.cmake
